@@ -1,18 +1,38 @@
+use async_openai::config::OpenAIConfig;
 use async_openai::{
     types::{
-        CreateAssistantRequestArgs, CreateMessageRequestArgs, CreateRunRequestArgs,
-        CreateThreadRequestArgs, MessageContent, MessageRole, RunStatus,
+        AssistantObject, CreateAssistantRequestArgs, CreateMessageRequestArgs,
+        CreateRunRequestArgs, CreateThreadRequestArgs, MessageContent, MessageRole, RunStatus,
     },
     Client,
 };
+use clap::Parser;
 use std::error::Error;
 
+use std::fs::File;
+use std::io::{self, Read};
+
 use std::borrow::Cow;
-use std::collections::HashMap;
 use streaming_iterator::StreamingIterator;
-use tree_sitter::{Parser, Query, QueryCursor};
+use tree_sitter::{Parser as TreeParser, Query, QueryCursor};
 
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+
+fn read_file(filename: &str) -> Result<String, io::Error> {
+    let mut file = File::open(filename)?;
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)?;
+    Ok(contents)
+}
+
+/// Simple program to greet a person
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    /// Name of the person to greet
+    #[arg(short, long)]
+    file: String,
+}
 
 #[derive(Debug)]
 struct FunctionData<'a> {
@@ -26,6 +46,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     unsafe {
         std::env::set_var("RUST_LOG", "ERROR");
     }
+
+    let args = Args::parse();
+    let source_code = read_file(&args.file)?;
 
     // Setup tracing subscriber so that library can log the errors
     tracing_subscriber::registry()
@@ -42,125 +65,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let thread_request = CreateThreadRequestArgs::default().build()?;
     let thread = client.threads().create(thread_request.clone()).await?;
 
-    let assistant_name = "Naggy".to_string();
-
-    let instructions = "
-        You are an assistant checking if the documentation strings match the function definition.
-        You are using the rust programming language.
-        Return your response in JSON.
-        There should be a field called 'confidence' include a float number from 0-1 representing how confident you are the documentation matches the function.
-        0 the documentation is completely off. 1 The documentation is a perfect match.
-        There should be another field called 'description' which is a string describing how the documentation differs from the implementation.
-        If the implemention matches already the 'description' should just read 'Documentation Okay'.
-    "
-    .to_string();
-
-    //create the assistant
-    let assistant_request = CreateAssistantRequestArgs::default()
-        .name(&assistant_name)
-        .instructions(&instructions)
-        .model("gpt-3.5-turbo-1106")
-        .build()?;
-    let assistant = client.assistants().create(assistant_request).await?;
+    let assistant = create_assistant(&client).await?;
     //get the id of the assistant
     let assistant_id = &assistant.id;
 
-    let source_code = "
-/// Generates a `RenderGraph` from the provided `World` struct.
-///
-/// # Parameters
-///
-/// - `world`: A reference to a `World` struct, which contains the game's state, including the board and entities.
-/// - `state`: A state object
-///
-/// # Returns
-///
-/// A `RenderGraph` struct that represents the entire scene to be rendered. The root node of the graph corresponds to
-/// the game's board, and its children correspond to the entities present in the world.
-///
-/// # Details
-///
-/// This function creates a hierarchical `RenderGraph` that represents the current state of the game world. The root
-/// node of the graph contains a `RenderItem::Board`, which represents the game board. The root node's children are
-/// `RenderNode`s that each contain a `RenderItem::Entity`, representing the entities in the world. Each entity is
-/// cloned from the `world` and encapsulated in a `RenderNode` without further children (i.e., `children` is `None`).
-///
-/// This graph structure allows for organized and flexible rendering of the game world. By constructing the scene
-/// as a tree of `RenderNode`s, it becomes easier to traverse and render the scene in a systematic way, ensuring
-/// that the board is rendered first, followed by the entities in the correct order.
-///
-/// This function is typically called before rendering to prepare the data needed to generate a visual representation
-/// of the game state.
-///
-/// # Examples
-///
-/// ```rust
-/// let world = World::new(); // Assume World::new initializes a game world
-/// let render_graph = generate_render_graph(&world);
-///
-/// // `render_graph` can now be passed to a rendering function
-/// let area = Rect::new(0, 0, 80, 24); // Example rendering area
-/// let glyph_buffer = glypherize_graph(render_graph, area, render_fn);
-/// ```
-fn generate_render_graph(world: &World) -> RenderGraph {
-    let children = world
-        .entities
-        .iter()
-        .map(|ent| RenderNode {
-            item: RenderItem::Entity(ent),
-            children: None,
-        })
-        .collect();
+    let fn_map = extract_function_data(&source_code);
 
-    RenderGraph {
-        root: RenderNode {
-            item: RenderItem::Board(&world.board),
-            children: Some(children),
-        },
-    }
-}
-
-/// In the level format we cant tell what tiles are floors and what tiles are empty
-/// This function takes a board, and working from the outside of the board in culls
-/// any floor tiles with an empty neighbour.
-pub fn cull_outer_tiles(board: &mut Array2<Tile>) -> &Array2<Tile> {
-    let (height, width) = board.dim();
-    // Check first and last column for Floor tiles to cull
-    for yi in 0..height {
-        if matches!(board[[yi, 0]], Tile::Floor) {
-            cull_tiles((yi, 0), board);
-        }
-        if matches!(board[[yi, width - 1]], Tile::Floor) {
-            cull_tiles((yi, width - 1), board);
-        }
-    }
-    // Check first and last row for Floor tiles to cull
-    for xi in 0..width {
-        if matches!(board[[0, xi]], Tile::Floor) {
-            cull_tiles((0, xi), board);
-        }
-        if matches!(board[[height - 1, xi]], Tile::Floor) {
-            cull_tiles((height - 1, xi), board);
-        }
-    }
-    board
-}
-    ";
-    let fn_map = extract_function_data(source_code);
-
-    fn_map.iter().for_each(|(_k, data)| {
-        println!("fn name: {}", data.name);
-        println!("-- fn doc --");
-        println!("{}", data.doc_string);
-        println!("-- fn body --");
-        println!("{}", data.body);
-        println!("------");
-    });
-
-    for (_k, data) in fn_map {
+    for data in fn_map {
         let input = format!(
-            "doc string\n\n{}\nfunction body\n\n{}\n",
-            data.doc_string, data.body
+            "FUNCTION_NAME\n\n{}\nDOC_STRING\n\n{}\nFUNCTION_BODY\n\n{}\n",
+            data.name, data.doc_string, data.body
         );
 
         //create a message for the thread
@@ -221,7 +135,7 @@ pub fn cull_outer_tiles(board: &mut Array2<Tile>) -> &Array2<Tile> {
                         MessageContent::Refusal(refusal) => refusal.refusal.clone(),
                     };
                     //print the text
-                    println!("--- Response: {}\n", text);
+                    println!("{}\n", text);
                 }
                 RunStatus::Failed => {
                     awaiting_response = false;
@@ -243,7 +157,7 @@ pub fn cull_outer_tiles(board: &mut Array2<Tile>) -> &Array2<Tile> {
                     println!("--- Run Requires Action");
                 }
                 RunStatus::InProgress => {
-                    println!("--- In Progress ...");
+                    // println!("--- In Progress ...");
                 }
                 RunStatus::Incomplete => {
                     println!("--- Run Incomplete");
@@ -261,8 +175,69 @@ pub fn cull_outer_tiles(board: &mut Array2<Tile>) -> &Array2<Tile> {
     Ok(())
 }
 
-fn extract_function_data(source_code: &str) -> HashMap<&str, FunctionData> {
-    let mut parser = Parser::new();
+async fn create_assistant(
+    client: &Client<OpenAIConfig>,
+) -> Result<AssistantObject, Box<dyn Error>> {
+    let assistant_name = "Naggy".to_string();
+
+    let instructions = "
+        Prompt:
+
+            You are an assistant that checks if the documentation strings match the function definition in Rust code.
+
+        Inputs:
+
+            You will be provided with a Rust function definition and its associated documentation.
+
+        Task:
+
+            Compare the documentation with the function definition and identify any discrepancies.
+
+        Output Instructions:
+
+            Return your response as a raw JSON object, without any additional text or formatting or markdown code blocks.
+            The JSON object should contain the following fields:
+                \"name\": The name of the function from the input data.
+                \"confidence\": A float number between 0.0 and 1.0 representing how confident you are that the documentation matches the function. 0.0 means not confident at all, and 1.0 means very confident.
+                \"errors\": A list of strings detailing errors that must be fixed. Errors include:
+                    Missing parameters in the documentation.
+                    Extra parameters in the documentation that are not in the function.
+                    Incorrect return type in the documentation.
+                \"warnings\": A list of strings containing suggestions to improve the documentation. These should be concise, like compiler or lint warnings. If there are no suggestions, this list can be empty.
+
+        Additional Guidelines:
+
+            A point should not be listed in both \"errors\" and \"warnings\". If it needs to be fixed, it should be an error; otherwise, it's a warning.
+            Ensure that the JSON is valid and includes only the specified fields.
+            Do not include any explanatory text outside the JSON object.
+
+        Example Output:
+
+        {
+          \"name\": \"my_function\",
+          \"confidence\": 0.9,
+          \"errors\": [
+            \"Parameter 'threshold' is missing in documentation\",
+            \"Return type in documentation does not match function\"
+          ],
+          \"warnings\": [
+            \"Consider adding usage examples to the documentation\"
+          ]
+        }
+    "
+    .to_string();
+
+    //create the assistant
+    let assistant_request = CreateAssistantRequestArgs::default()
+        .name(&assistant_name)
+        .instructions(&instructions)
+        .model("gpt-4o")
+        .build()?;
+    Ok(client.assistants().create(assistant_request).await?)
+}
+
+fn extract_function_data(source_code: &str) -> Vec<FunctionData> {
+    let mut parser = TreeParser::new();
     parser
         .set_language(&tree_sitter_rust::LANGUAGE.into())
         .expect("Error loading Rust grammar");
@@ -279,8 +254,6 @@ fn extract_function_data(source_code: &str) -> HashMap<&str, FunctionData> {
     .unwrap();
 
     let tree = parser.parse(source_code, None).unwrap();
-    let root_node = tree.root_node();
-    println!("{}", root_node);
 
     let mut query_cursor = QueryCursor::new();
 
@@ -295,7 +268,7 @@ fn extract_function_data(source_code: &str) -> HashMap<&str, FunctionData> {
         .capture_index_for_name("function_def")
         .unwrap();
 
-    let mut fn_map: HashMap<&str, FunctionData> = HashMap::new();
+    let mut function_data: Vec<FunctionData> = Vec::new();
     while let Some(item) = matches.next() {
         let function_name = item
             .captures
@@ -328,14 +301,11 @@ fn extract_function_data(source_code: &str) -> HashMap<&str, FunctionData> {
         } else {
             Cow::Owned(comments.concat())
         };
-        fn_map.insert(
+        function_data.push(FunctionData {
             name,
-            FunctionData {
-                name,
-                body,
-                doc_string,
-            },
-        );
+            body,
+            doc_string,
+        });
     }
-    fn_map
+    function_data
 }
