@@ -78,7 +78,7 @@ fn another_one() {
             .find(|capture| capture.index == function_def_index)
             .unwrap();
 
-        let mut comments: Vec<&str> = item
+        let comments: Vec<&str> = item
             .captures
             .iter()
             .filter_map(|capture| {
