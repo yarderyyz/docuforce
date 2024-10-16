@@ -50,16 +50,26 @@ pub fn extract_function_data(source_code: &str) -> Vec<FunctionData> {
             .find(|capture| capture.index == function_def_index)
             .unwrap();
 
-        let comments: Vec<&str> = item
+        let comment_nodes: Vec<_> = item
             .captures
             .iter()
             .filter_map(|capture| {
                 if capture.index == comment_index {
-                    Some(&source_code[capture.node.byte_range()])
+                    Some(&capture.node)
                 } else {
                     None
                 }
             })
+            .collect();
+
+        let position = comment_nodes
+            .first()
+            .map(|node| node.start_position())
+            .unwrap_or_default();
+
+        let comments: Vec<&str> = comment_nodes
+            .into_iter()
+            .map(|node| &source_code[node.byte_range()])
             .collect();
 
         let name = &source_code[function_name.node.byte_range()];
@@ -70,6 +80,7 @@ pub fn extract_function_data(source_code: &str) -> Vec<FunctionData> {
             Cow::Owned(comments.concat())
         };
         function_data.push(FunctionData {
+            position,
             name,
             body,
             doc_string,

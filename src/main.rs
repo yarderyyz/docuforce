@@ -1,11 +1,13 @@
 use async_openai::Client;
 use clap::Parser;
+use sqlx::{sqlite::SqliteConnectOptions, SqlitePool};
 use std::error::Error;
 
 use std::fs::File;
 use std::io::{self, Read};
 
 mod assistant;
+mod cache;
 mod parser;
 mod types;
 
@@ -34,6 +36,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
     let source_code = read_file(&args.file)?;
 
+    let options = SqliteConnectOptions::new()
+        .filename("sqlite:cache.db")
+        .create_if_missing(true);
+
+    let pool = SqlitePool::connect_with(options).await?;
+    sqlx::query(include_str!("migrations/cache_1.sql"))
+        .execute(&pool)
+        .await?;
+
     // Setup tracing subscriber so that library can log the errors
     tracing_subscriber::registry()
         .with(fmt::layer())
@@ -49,7 +60,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let fn_map = parser::extract_function_data(&source_code);
 
     // TODO: build sqlite3 cache and only run query for functions that have changed since last run.
-    assistant.run_openai_query(fn_map, &client).await?;
+    assistant.run_openai_query(fn_map, &client, &pool).await?;
 
     // TODO: after query runs update database
     Ok(())

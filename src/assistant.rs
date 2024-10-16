@@ -1,3 +1,4 @@
+use crate::cache::{get_cache_entry_by_hash, insert_or_update_cache_entry, CacheEntry};
 use crate::types::{DocumentationAssistant, FunctionData};
 use async_openai::config::OpenAIConfig;
 use async_openai::{
@@ -7,6 +8,8 @@ use async_openai::{
     },
     Client,
 };
+use serde::Deserialize;
+use sqlx::{Pool, Sqlite};
 use std::error::Error;
 
 const ASSISTANT_NAME: &str = "Naggy";
@@ -30,6 +33,7 @@ Output Instructions:
     The JSON object should contain the following fields:
         "name": The name of the function from the input data.
         "confidence": A float number between 0.0 and 1.0 representing how confident you are that the documentation matches the function. 0.0 means not confident at all, and 1.0 means very confident.
+        "hash": An echo of the hash provided.
         "errors": A list of strings detailing errors that must be fixed. Errors include:
             Missing parameters in the documentation.
             Extra parameters in the documentation that are not in the function.
@@ -75,6 +79,7 @@ impl DocumentationAssistant {
         self: &DocumentationAssistant,
         query_data: Vec<FunctionData<'_>>,
         client: &Client<OpenAIConfig>,
+        pool: &Pool<Sqlite>,
     ) -> Result<(), Box<dyn Error>> {
         //create a thread for the conversation
         let thread_request = CreateThreadRequestArgs::default().build()?;
@@ -86,9 +91,18 @@ impl DocumentationAssistant {
         let openai_assistant_id = &openai_assistant.id;
 
         for data in query_data {
+            let entry = get_cache_entry_by_hash(pool, &data.compute_hash()).await?;
+            if let Some(entry) = entry {
+                println!("Found cached: {:?}", entry);
+                continue;
+            }
+
             let input = format!(
-                "FUNCTION_NAME\n\n{}\nDOC_STRING\n\n{}\nFUNCTION_BODY\n\n{}\n",
-                data.name, data.doc_string, data.body
+                "HASH\n\n{}\nFUNCTION_NAME\n\n{}\nDOC_STRING\n\n{}\nFUNCTION_BODY\n\n{}\n",
+                &data.compute_hash(),
+                data.name,
+                data.doc_string,
+                data.body
             );
 
             //limit the list responses to 1 message
@@ -147,12 +161,15 @@ impl DocumentationAssistant {
                         let text = match content {
                             MessageContent::Text(text) => text.text.value.clone(),
                             MessageContent::ImageFile(_) | MessageContent::ImageUrl(_) => {
-                                panic!("imaged are not expected in this example");
+                                panic!("images are not expected");
                             }
                             MessageContent::Refusal(refusal) => refusal.refusal.clone(),
                         };
-                        //print the text
-                        println!("{}\n", text);
+
+                        let entry: CacheEntry = serde_json::from_str(&text)?;
+                        insert_or_update_cache_entry(pool, &entry).await?;
+
+                        println!("AI Generated: {:?}", entry);
                     }
                     RunStatus::Failed => {
                         awaiting_response = false;
