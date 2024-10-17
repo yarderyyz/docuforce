@@ -1,5 +1,6 @@
 use async_openai::Client;
 use clap::Parser;
+use futures::future::join_all;
 use sqlx::{sqlite::SqliteConnectOptions, SqlitePool};
 use std::error::Error;
 
@@ -84,10 +85,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let assistant = types::DocumentationAssistant::default();
 
     let fn_map = parser::extract_function_data(&source_code);
+    let queries: Vec<_> = fn_map
+        .into_iter()
+        .map(|data| assistant.run_openai_query(data, &client, &pool))
+        .collect();
+    join_all(queries).await;
 
-    // TODO: build sqlite3 cache and only run query for functions that have changed since last run.
-    assistant.run_openai_query(fn_map, &client, &pool).await?;
-
-    // TODO: after query runs update database
     Ok(())
 }
