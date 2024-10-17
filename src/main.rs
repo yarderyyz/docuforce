@@ -3,8 +3,10 @@ use clap::Parser;
 use sqlx::{sqlite::SqliteConnectOptions, SqlitePool};
 use std::error::Error;
 
+use std::fs;
 use std::fs::File;
 use std::io::{self, Read};
+use std::path::Path;
 
 mod assistant;
 mod cache;
@@ -24,7 +26,26 @@ fn read_file(filename: &str) -> Result<String, io::Error> {
 #[command(version, about, long_about = None)]
 struct Args {
     #[arg(short, long)]
-    file: String,
+    file: Option<String>,
+    #[arg(short, long)]
+    init: bool,
+}
+
+const HIDDEN_DIR: &str = ".docuforce/";
+const DEFAULT_DATABSE: &str = ".docuforce/sqlite:cache.db";
+
+async fn init_database() -> Result<(), Box<dyn Error>> {
+    let path = Path::new(HIDDEN_DIR);
+    fs::create_dir_all(path)?;
+
+    let options = SqliteConnectOptions::new()
+        .filename(DEFAULT_DATABSE)
+        .create_if_missing(true);
+    let pool = SqlitePool::connect_with(options).await?;
+    sqlx::query(include_str!("migrations/cache_1.sql"))
+        .execute(&pool)
+        .await?;
+    Ok(())
 }
 
 #[tokio::main]
@@ -34,16 +55,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let args = Args::parse();
-    let source_code = read_file(&args.file)?;
 
-    let options = SqliteConnectOptions::new()
-        .filename("sqlite:cache.db")
-        .create_if_missing(true);
+    if args.init {
+        init_database().await?;
+    }
 
+    let file = if let Some(file) = &args.file {
+        file
+    } else {
+        return Ok(());
+    };
+
+    let options = SqliteConnectOptions::new().filename(DEFAULT_DATABSE);
     let pool = SqlitePool::connect_with(options).await?;
-    sqlx::query(include_str!("migrations/cache_1.sql"))
-        .execute(&pool)
-        .await?;
+
+    let source_code = read_file(file)?;
 
     // Setup tracing subscriber so that library can log the errors
     tracing_subscriber::registry()
