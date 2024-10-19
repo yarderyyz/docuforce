@@ -1,6 +1,7 @@
 use async_openai::Client;
 use clap::Parser;
 use futures::future::join_all;
+use parser::CommentParser;
 use sqlx::{sqlite::SqliteConnectOptions, SqlitePool};
 use std::error::Error;
 
@@ -79,17 +80,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .init();
 
     //create a client
-    let client = Client::new();
+    let ai_client = Client::new();
 
     // TODO: Refactor to use DI for openai bs so we can swap clients down the road
     let assistant = types::DocumentationAssistant::default();
 
-    let fn_map = parser::extract_function_data(&source_code);
-    let queries: Vec<_> = fn_map
-        .into_iter()
-        .map(|data| assistant.run_openai_query(data, &client, &pool))
-        .collect();
-    join_all(queries).await;
-
+    if let Some(mut comment_parser) = CommentParser::maybe_new_rust_parser() {
+        let fn_map = parser::extract_function_data(&source_code, &mut comment_parser);
+        let ai_queries: Vec<_> = fn_map
+            .into_iter()
+            .map(|data| assistant.run_openai_query(data, &ai_client, &pool))
+            .collect();
+        join_all(ai_queries).await;
+    } else {
+        println!("Failed to load parser")
+    }
     Ok(())
 }
