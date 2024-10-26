@@ -34,7 +34,12 @@ impl DocumentationAssistant {
         data: FunctionData<'_>,
         client: &Client<OpenAIConfig>,
         pool: &Pool<Sqlite>,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<Option<CacheEntry>, Box<dyn Error>> {
+        let entry = get_cache_entry_by_hash(pool, &data.compute_hash()).await?;
+        if let Some(entry) = entry {
+            return Ok(Some(entry));
+        }
+
         //create a thread for the conversation
         let thread_request = CreateThreadRequestArgs::default().build()?;
         let thread = client.threads().create(thread_request.clone()).await?;
@@ -43,12 +48,6 @@ impl DocumentationAssistant {
 
         //get the id of the openai_assistant
         let openai_assistant_id = &openai_assistant.id;
-
-        let entry = get_cache_entry_by_hash(pool, &data.compute_hash()).await?;
-        if let Some(entry) = entry {
-            println!("Found cached: {:?}", entry);
-            return Ok(());
-        }
 
         let input = format!(
             "HASH\n\n{}\nFUNCTION_NAME\n\n{}\nDOC_STRING\n\n{}\nFUNCTION_BODY\n\n{}\n",
@@ -92,7 +91,7 @@ impl DocumentationAssistant {
             //check the status of the run
             match run.status {
                 RunStatus::Completed => {
-                    awaiting_response = false;
+                    // awaiting_response = false;
                     // once the run is completed we
                     // get the response from the run
                     // which will be the first message
@@ -122,7 +121,7 @@ impl DocumentationAssistant {
                     let entry: CacheEntry = serde_json::from_str(&text)?;
                     insert_or_update_cache_entry(pool, &entry).await?;
 
-                    println!("AI Generated: {:?}", entry);
+                    return Ok(Some(entry));
                 }
                 RunStatus::Failed => {
                     awaiting_response = false;
@@ -157,7 +156,7 @@ impl DocumentationAssistant {
         client.assistants().delete(openai_assistant_id).await?;
         client.threads().delete(&thread.id).await?;
 
-        Ok(())
+        Ok(None)
     }
 }
 
